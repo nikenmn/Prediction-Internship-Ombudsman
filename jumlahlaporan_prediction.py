@@ -464,3 +464,211 @@ future_yearly = (
 
 print("\n===== FUTURE YEARLY FORECAST =====")
 print(future_yearly)
+
+
+
+
+
+# ==========================================================
+# Data Differencing in Yearly and Quarterly Prediction
+# ----------------------------------------------------------
+# MONTHLY MODEL (Train until January 2026)
+# QUARTERLY & YEARLY (Only until December 2025)
+# WITH TRAIN & TEST EVALUATION
+# ==========================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# ---------- SMAPE ----------
+def smape(y_true, y_pred):
+    denom = (np.abs(y_true) + np.abs(y_pred))
+    denom[denom == 0] = 1
+    return 100 * np.mean(2 * np.abs(y_pred - y_true) / denom)
+
+# ==========================================================
+# DATA SPLIT RULES
+# ==========================================================
+
+# Monthly model uses data until Jan 2026
+monthly_df = df[df["ds"] <= "2026-01-31"].copy()
+
+# Quarterly & Yearly aggregation only until Dec 2025
+agg_df = df[df["ds"] <= "2025-12-31"].copy()
+
+# ==========================================================
+# FEATURE ENGINEERING (MONTHLY MODEL)
+# ==========================================================
+
+for lag in [1,2,3,6,12]:
+    monthly_df[f"lag_{lag}"] = monthly_df["y"].shift(lag)
+
+monthly_df["roll_mean_3"] = monthly_df["y"].rolling(3).mean()
+monthly_df["roll_mean_6"] = monthly_df["y"].rolling(6).mean()
+monthly_df["roll_std_6"] = monthly_df["y"].rolling(6).std()
+monthly_df["diff_1"] = monthly_df["y"] - monthly_df["lag_1"]
+
+monthly_df["month"] = monthly_df["ds"].dt.month
+monthly_df["month_sin"] = np.sin(2*np.pi*monthly_df["month"]/12)
+monthly_df["month_cos"] = np.cos(2*np.pi*monthly_df["month"]/12)
+
+monthly_df["time_index"] = np.arange(len(monthly_df))
+
+monthly_df = monthly_df.dropna()
+
+# ==========================================================
+# TRAIN TEST SPLIT (Last 12 months for evaluation)
+# ==========================================================
+
+train = monthly_df.iloc[:-12]
+test = monthly_df.iloc[-12:]
+
+features = [col for col in monthly_df.columns if col not in ["ds","y","month"]]
+
+X_train = train[features]
+y_train = train["y"]
+
+X_test = test[features]
+y_test = test["y"]
+
+# ==========================================================
+# TRAIN MODEL (using best_model structure)
+# ==========================================================
+
+model = best_model  # reuse tuned XGBoost
+model.fit(X_train, y_train)
+
+# ==========================================================
+# TRAIN & TEST EVALUATION
+# ==========================================================
+
+y_train_pred = model.predict(X_train)
+y_test_pred = model.predict(X_test)
+
+print("===== TRAIN PERFORMANCE =====")
+print("MAE   :", mean_absolute_error(y_train, y_train_pred))
+print("RMSE  :", np.sqrt(mean_squared_error(y_train, y_train_pred)))
+print("MAPE  :", np.mean(np.abs((y_train - y_train_pred) / y_train)) * 100, "%")
+print("SMAPE :", smape(y_train.values, y_train_pred), "%")
+
+print("\n===== TEST PERFORMANCE =====")
+print("MAE   :", mean_absolute_error(y_test, y_test_pred))
+print("RMSE  :", np.sqrt(mean_squared_error(y_test, y_test_pred)))
+print("MAPE  :", np.mean(np.abs((y_test - y_test_pred) / y_test)) * 100, "%")
+print("SMAPE :", smape(y_test.values, y_test_pred), "%")
+
+# ==========================================================
+# MONTHLY TEST PREDICTION TABLE
+# ==========================================================
+
+monthly_results = test[["ds"]].copy()
+monthly_results["Actual"] = y_test.values
+monthly_results["Predicted"] = y_test_pred
+monthly_results["Error"] = monthly_results["Actual"] - monthly_results["Predicted"]
+
+print("\n===== MONTHLY TEST PREDICTIONS =====")
+print(monthly_results)
+
+# ==========================================================
+# QUARTERLY & YEARLY (ONLY UNTIL DEC 2025)
+# ==========================================================
+
+agg_df["Quarter"] = agg_df["ds"].dt.to_period("Q")
+agg_df["Year"] = agg_df["ds"].dt.to_period("Y")
+
+quarterly_actual = (
+    agg_df.groupby("Quarter")["y"]
+    .sum()
+    .reset_index()
+)
+
+yearly_actual = (
+    agg_df.groupby("Year")["y"]
+    .sum()
+    .reset_index()
+)
+
+print("\n===== QUARTERLY ACTUAL (UNTIL 2025) =====")
+print(quarterly_actual.tail())
+
+print("\n===== YEARLY ACTUAL (UNTIL 2025) =====")
+print(yearly_actual.tail())
+
+# ==========================================================
+# FUTURE MONTHLY FORECAST (12 months)
+# ==========================================================
+
+future_predictions = []
+last_known = monthly_df.copy()
+
+for i in range(12):
+
+    row = last_known.iloc[-1:].copy()
+    next_date = pd.to_datetime(row["ds"].values[0]) + pd.DateOffset(months=1)
+
+    new_row = row.copy()
+    new_row["ds"] = next_date
+    new_row["time_index"] = last_known["time_index"].max() + 1
+
+    month = next_date.month
+    new_row["month_sin"] = np.sin(2*np.pi*month/12)
+    new_row["month_cos"] = np.cos(2*np.pi*month/12)
+
+    for lag in [1,2,3,6,12]:
+        new_row[f"lag_{lag}"] = last_known["y"].iloc[-lag]
+
+    new_row["roll_mean_3"] = last_known["y"].tail(3).mean()
+    new_row["roll_mean_6"] = last_known["y"].tail(6).mean()
+    new_row["roll_std_6"] = last_known["y"].tail(6).std()
+    new_row["diff_1"] = last_known["y"].iloc[-1] - last_known["y"].iloc[-2]
+
+    X_new = new_row[features]
+    pred = model.predict(X_new)[0]
+
+    new_row["y"] = pred
+    future_predictions.append([next_date, pred])
+
+    last_known = pd.concat([last_known, new_row], ignore_index=True)
+
+future_forecast = pd.DataFrame(future_predictions, columns=["ds","Forecast"])
+
+print("\n===== FUTURE MONTHLY FORECAST =====")
+print(future_forecast)
+
+
+# ==========================================================
+# FUTURE QUARTERLY FORECAST (FROM MONTHLY FORECAST)
+# ==========================================================
+
+future_forecast["Quarter"] = future_forecast["ds"].dt.to_period("Q")
+
+future_quarterly = (
+    future_forecast
+    .groupby("Quarter")["Forecast"]
+    .sum()
+    .reset_index()
+)
+
+print("\n===== FUTURE QUARTERLY FORECAST =====")
+print(future_quarterly)
+
+
+# ==========================================================
+# FUTURE YEARLY FORECAST (FROM MONTHLY FORECAST)
+# ==========================================================
+
+future_forecast["Year"] = future_forecast["ds"].dt.to_period("Y")
+
+future_yearly = (
+    future_forecast
+    .groupby("Year")["Forecast"]
+    .sum()
+    .reset_index()
+)
+
+print("\n===== FUTURE YEARLY FORECAST =====")
+print(future_yearly)
+
+
